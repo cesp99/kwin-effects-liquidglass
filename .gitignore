@@ -1,3 +1,8 @@
 result*
 .idea
 cmake-build-debug
+build/
+src/shaders/texture.frag
+src/shaders/texture_core.frag
+src/shaders/upsample.frag
+src/shaders/upsample_core.frag

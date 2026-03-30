@@ -24,8 +24,7 @@ changes.
 Currently supported versions: **6.4**
 
 Latest Better Blur versions for previous Plasma releases:
-- **6.0.0 - 6.3.5**: [v1.3.6](https://github.com/taj-ny/kwin-effects-forceblur/releases/tag/v1.3.6),
-[fea9f80f27389aa8a62befb5babf40b28fed328d](https://github.com/taj-ny/kwin-effects-forceblur/tree/fea9f80f27389aa8a62befb5babf40b28fed328d)
+- **6.0.0 - 6.3.5**: [v1.3.6](https://github.com/taj-ny/kwin-effects-forceblur/releases/tag/v1.3.6) (upstream)
 
 # Installation
 > [!IMPORTANT]
@@ -160,35 +159,17 @@ Latest Better Blur versions for previous Plasma releases:
 </details>
 
 ### Building
+Clone the repository and run the install script:
+
 ```sh
-git clone https://github.com/taj-ny/kwin-effects-forceblur
+git clone https://github.com/cesp99/kwin-effects-forceblur
 cd kwin-effects-forceblur
-mkdir build
-cd build
-cmake .. -DCMAKE_INSTALL_PREFIX=/usr
-make -j$(nproc)
-sudo make install
+./install.sh
 ```
 
-<details>
-  <summary>Building on Fedora Kinoite</summary>
-  <br>
+The script configures, builds and installs the effect in one step. It will prompt for your sudo password during installation.
 
-  ```sh
-  # enter container
-  git clone https://github.com/taj-ny/kwin-effects-forceblur
-  cd kwin-effects-forceblur
-  mkdir build
-  cd build
-  cmake .. -DCMAKE_INSTALL_PREFIX=/usr
-  make -j$(nproc)
-  cpack -V -G RPM
-  exit # exit container
-  sudo rpm-ostree install kwin-effects-forceblur/build/kwin-better-blur.rpm
-  ```
-</details>
-
-**Remove the *build* directory when rebuilding the effect.**
+> **Note:** Remove the *build* directory when rebuilding the effect after a system upgrade.
 
 # Usage
 This effect will conflict with the stock blur effect and any other forks of it.
@@ -198,7 +179,7 @@ This effect will conflict with the stock blur effect and any other forks of it.
 3. Disable any blur effects.
 4. Enable the *Better Blur* effect.
 
-For more detailed descriptions of some options, check out [this wiki page](https://github.com/taj-ny/kwin-effects-forceblur/wiki/Configuration).
+For more detailed descriptions of some options, check out [configuration.md](docs/configuration.md).
 
 ### Window transparency
 The window needs to be translucent in order for the blur to be visible. This can be done in multiple ways:
@@ -217,4 +198,6 @@ This effect can be very resource-intensive if you have a lot of windows open. On
 Intel GPUs use software cursor by default due to [this bug](https://gitlab.freedesktop.org/drm/intel/-/issues/9571), however it doesn't seem to affect all GPUs.
 
 # Credits
+- [taj-ny/kwin-effects-forceblur](https://github.com/taj-ny/kwin-effects-forceblur) - original fork this is based on
+- [iGerman00/kwin-effects-forceblur](https://github.com/iGerman00/kwin-effects-forceblur) - upstream of this fork
 - [a-parhom/LightlyShaders](https://github.com/a-parhom/LightlyShaders) - CMakeLists.txt files
