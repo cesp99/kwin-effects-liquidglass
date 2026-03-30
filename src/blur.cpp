@@ -12,6 +12,7 @@
 
 #include "core/output.h"
 #include "core/pixelgrid.h"
+#include "scene/scene.h"
 #include "core/rendertarget.h"
 #include "core/renderviewport.h"
 #include "effect/effecthandler.h"
@@ -61,6 +62,7 @@ QTimer *BlurEffect::s_blurManagerRemoveTimer = nullptr;
 
 BlurEffect::BlurEffect()
 {
+    qWarning() << "forceblur: constructor entered";
     BlurConfig::instance(effects->config());
     ensureResources();
 
@@ -164,6 +166,7 @@ BlurEffect::BlurEffect()
     }
 
     m_valid = true;
+    qWarning() << "forceblur: effect initialized successfully";
 }
 
 BlurEffect::~BlurEffect()
@@ -417,6 +420,7 @@ void BlurEffect::slotScreenRemoved(KWin::LogicalOutput *screen)
         disconnect(*it);
         screenChangedConnections.erase(it);
     }
+    m_staticBlurTextures.erase(screen);
 }
 
 void BlurEffect::slotPropertyNotify(EffectWindow *w, long atom)
@@ -506,9 +510,11 @@ QRegion BlurEffect::blurRegion(EffectWindow *w) const
 
 void BlurEffect::prePaintScreen(ScreenPrePaintData &data, std::chrono::milliseconds presentTime)
 {
-    m_paintedArea = QRegion();
-    m_currentBlur = QRegion();
+    m_paintedDeviceArea = Region();
+    m_currentDeviceBlur = Region();
+    m_currentView = data.view;
     m_currentScreen = effects->waylandDisplay() ? data.screen : nullptr;
+    m_windowsBlurredThisFrame.clear();
 
     effects->prePaintScreen(data, presentTime);
 }
@@ -517,13 +523,27 @@ void BlurEffect::prePaintWindow(RenderView *view, EffectWindow *w, WindowPrePain
 {
     // this effect relies on prePaintWindow being called in the bottom to top order
 
-    // in case this window has regions to be blurred
-    const QRegion blurArea = blurRegion(w).translated(w->pos().toPoint());
+    // in case this window has regions to be blurred (device coordinates)
+    RenderView *renderView = view ? view : m_currentView;
+    LogicalOutput *renderScreen = effects->waylandDisplay() && w ? w->window()->output() : m_currentScreen;
+    if (!renderScreen && renderView && effects->waylandDisplay()) {
+        renderScreen = renderView->logicalOutput();
+    }
+    m_currentScreen = renderScreen;
+    const QRegion blurAreaLogical = blurRegion(w).translated(w->pos().toPoint());
+    const Region deviceBlurArea = renderView ? renderView->mapToDeviceCoordinatesAligned(Region(blurAreaLogical)) : Region(blurAreaLogical);
+    if (!deviceBlurArea.isEmpty()) {
+        // Ensure the blur area participates in damage tracking on newer KWin render paths.
+        data.devicePaint |= deviceBlurArea;
+        // Temporary workaround for multi-output damage propagation issues.
+        data.devicePaint |= Region::infinite();
+    }
 
-    bool staticBlur = hasStaticBlur(w) && m_staticBlurTextures.contains(m_currentScreen) && !blurArea.isEmpty();
+    // Wayland multi-output currently has per-output static-texture coordinate issues; fall back to dynamic blur.
+    bool staticBlur = !effects->waylandDisplay() && hasStaticBlur(w) && m_staticBlurTextures.contains(renderScreen) && !deviceBlurArea.isEmpty();
     if (staticBlur) {
         if (!m_settings.general.windowOpacityAffectsBlur) {
-            data.deviceOpaque |= Region(blurArea);
+            data.deviceOpaque |= deviceBlurArea;
         }
 
         int topCornerRadius;
@@ -537,8 +557,8 @@ void BlurEffect::prePaintWindow(RenderView *view, EffectWindow *w, WindowPrePain
             bottomCornerRadius = std::ceil(m_settings.roundedCorners.windowBottomRadius);
         }
 
-        if (!w->isDock() || (w->isDock() && isDockFloating(w, blurArea))) {
-            const QRect blurRect = blurArea.boundingRect();
+        if (!w->isDock() || (w->isDock() && isDockFloating(w, blurAreaLogical))) {
+            const Rect blurRect = deviceBlurArea.boundingRect();
             data.deviceOpaque -= Rect(QRect(blurRect.x(), blurRect.y(), topCornerRadius, topCornerRadius));
             data.deviceOpaque -= Rect(QRect(blurRect.x() + blurRect.width() - topCornerRadius, blurRect.y(), topCornerRadius, topCornerRadius));
             data.deviceOpaque -= Rect(QRect(blurRect.x(), blurRect.y() + blurRect.height() - bottomCornerRadius, bottomCornerRadius, bottomCornerRadius));
@@ -568,14 +588,17 @@ void BlurEffect::prePaintWindow(RenderView *view, EffectWindow *w, WindowPrePain
                 }
 
                 if (hadWindowBehind != it->second.hasWindowBehind) {
-                    data.devicePaint |= Region(blurArea);
-                    data.deviceOpaque -= Region(blurArea);
+                    data.devicePaint |= deviceBlurArea;
+                    data.deviceOpaque -= deviceBlurArea;
                 }
             }
         }
 
-        if (m_settings.staticBlur.imageSource == StaticBlurImageSource::DesktopWallpaper && w->isDesktop() && w->frameGeometry() == QRectF(static_cast<QRect>(data.devicePaint.boundingRect()))) {
-            m_staticBlurTextures.erase(m_currentScreen);
+        const QRect repaintRectLogical = renderView
+            ? QRect(renderView->mapFromDeviceCoordinatesAligned(data.devicePaint.boundingRect()))
+            : QRect(data.devicePaint.boundingRect());
+        if (m_settings.staticBlur.imageSource == StaticBlurImageSource::DesktopWallpaper && w->isDesktop() && w->frameGeometry() == QRectF(repaintRectLogical)) {
+            m_staticBlurTextures.erase(renderScreen);
         }
     }
 
@@ -586,42 +609,41 @@ void BlurEffect::prePaintWindow(RenderView *view, EffectWindow *w, WindowPrePain
     effects->prePaintWindow(view, w, data, presentTime);
 
     if (!staticBlur) {
-        const QRegion oldOpaque = static_cast<QRegion>(data.deviceOpaque);
-        if (data.deviceOpaque.intersects(Region(m_currentBlur))) {
+        const Region oldOpaque = data.deviceOpaque;
+        if (data.deviceOpaque.intersects(m_currentDeviceBlur)) {
             // to blur an area partially we have to shrink the opaque area of a window
-            QRegion newOpaque;
+            Region newOpaque;
             for (const Rect &rect : data.deviceOpaque.rects()) {
-                newOpaque += QRect(rect).adjusted(m_expandSize, m_expandSize, -m_expandSize, -m_expandSize);
+                newOpaque |= Rect(QRect(rect).adjusted(m_expandSize, m_expandSize, -m_expandSize, -m_expandSize));
             }
-            data.deviceOpaque = Region(newOpaque);
+            data.deviceOpaque = newOpaque;
 
             // we don't have to blur a region we don't see
-            m_currentBlur -= newOpaque;
+            m_currentDeviceBlur -= newOpaque;
         }
 
-        const QRegion devicePaint = static_cast<QRegion>(data.devicePaint);
-        // if we have to paint a non-opaque part of this window that hasWindowBehind with the
+        // if we have to paint a non-opaque part of this window that intersects with the
         // currently blurred region we have to redraw the whole region
-        if ((devicePaint - oldOpaque).intersects(m_currentBlur)) {
-            data.devicePaint |= Region(m_currentBlur);
+        if ((data.devicePaint - oldOpaque).intersects(m_currentDeviceBlur)) {
+            data.devicePaint |= m_currentDeviceBlur;
         }
 
         // if this window or a window underneath the blurred area is painted again we have to
         // blur everything
-        if (m_paintedArea.intersects(blurArea) || devicePaint.intersects(blurArea)) {
-            data.devicePaint |= Region(blurArea);
+        if (m_paintedDeviceArea.intersects(deviceBlurArea) || data.devicePaint.intersects(deviceBlurArea)) {
+            data.devicePaint |= deviceBlurArea;
             // we have to check again whether we do not damage a blurred area
             // of a window
-            if (blurArea.intersects(m_currentBlur)) {
-                data.devicePaint |= Region(m_currentBlur);
+            if (deviceBlurArea.intersects(m_currentDeviceBlur)) {
+                data.devicePaint |= m_currentDeviceBlur;
             }
         }
 
-        m_currentBlur += blurArea;
+        m_currentDeviceBlur |= deviceBlurArea;
     }
 
-    m_paintedArea -= static_cast<QRegion>(data.deviceOpaque);
-    m_paintedArea += static_cast<QRegion>(data.devicePaint);
+    m_paintedDeviceArea -= data.deviceOpaque;
+    m_paintedDeviceArea |= data.devicePaint;
 }
 
 bool BlurEffect::shouldBlur(const EffectWindow *w, int mask, const WindowPaintData &data)
@@ -671,14 +693,40 @@ bool BlurEffect::shouldForceBlur(const EffectWindow *w) const
         || (!matches && m_settings.forceBlur.windowClassMatchingMode == WindowClassMatchingMode::Blacklist);
 }
 
+void BlurEffect::paintWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &region, WindowPaintData &data)
+{
+    auto it = m_windows.find(w);
+    if (it == m_windows.end() && shouldForceBlur(w)) {
+        updateBlurRegion(w);
+        it = m_windows.find(w);
+    }
+    if (it != m_windows.end() && !m_windowsBlurredThisFrame.contains(w)) {
+        BlurEffectData &blurInfo = it->second;
+        LogicalOutput *renderScreen = effects->waylandDisplay() && w ? w->window()->output() : m_currentScreen;
+        BlurRenderData &renderInfo = blurInfo.render[renderScreen];
+        if (shouldBlur(w, mask, data)) {
+            blur(renderInfo, renderTarget, viewport, w, mask, region, data, renderScreen);
+            m_windowsBlurredThisFrame.insert(w);
+        }
+    }
+
+    effects->paintWindow(renderTarget, viewport, w, mask, region, data);
+}
+
 void BlurEffect::drawWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &region, WindowPaintData &data)
 {
     auto it = m_windows.find(w);
-    if (it != m_windows.end()) {
+    if (it == m_windows.end() && shouldForceBlur(w)) {
+        updateBlurRegion(w);
+        it = m_windows.find(w);
+    }
+    if (it != m_windows.end() && !m_windowsBlurredThisFrame.contains(w)) {
         BlurEffectData &blurInfo = it->second;
-        BlurRenderData &renderInfo = blurInfo.render[m_currentScreen];
+        LogicalOutput *renderScreen = effects->waylandDisplay() && w ? w->window()->output() : m_currentScreen;
+        BlurRenderData &renderInfo = blurInfo.render[renderScreen];
         if (shouldBlur(w, mask, data)) {
-            blur(renderInfo, renderTarget, viewport, w, mask, region, data);
+            blur(renderInfo, renderTarget, viewport, w, mask, region, data, renderScreen);
+            m_windowsBlurredThisFrame.insert(w);
         }
     }
 
@@ -746,8 +794,18 @@ GLTexture *BlurEffect::ensureNoiseTexture()
     return noiseTexture.get();
 }
 
-void BlurEffect::blur(BlurRenderData &renderInfo, const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &region, WindowPaintData &data)
+void BlurEffect::blur(BlurRenderData &renderInfo, const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &region, WindowPaintData &data, LogicalOutput *screen)
 {
+    static bool loggedBlurEntry = false;
+    if (!loggedBlurEntry) {
+        loggedBlurEntry = true;
+        qWarning() << "forceblur: blur() called at least once";
+    }
+    const QString outputName = screen ? screen->name() : QStringLiteral("<null>");
+    if (!m_loggedBlurOutputs.contains(outputName)) {
+        m_loggedBlurOutputs.insert(outputName);
+        qWarning() << "forceblur: blur() on output" << outputName;
+    }
     // Compute the effective blur shape. Note that if the window is transformed, so will be the blur shape.
     QRegion blurShape = w ? blurRegion(w).translated(w->pos().toPoint()) : static_cast<QRegion>(region);
     if (data.xScale() != 1 || data.yScale() != 1) {
@@ -766,28 +824,16 @@ void BlurEffect::blur(BlurRenderData &renderInfo, const RenderTarget &renderTarg
     }
 
     const QRect backgroundRect = blurShape.boundingRect();
-    const QRect deviceBackgroundRect = snapToPixelGrid(scaledRect(backgroundRect, viewport.scale()));
+    const Rect deviceBackgroundRect = viewport.mapToDeviceCoordinatesAligned(Rect(backgroundRect));
+    const Rect localBackgroundRect = deviceBackgroundRect.translated(-viewport.renderOffset());
     const auto opacity = w && m_settings.general.windowOpacityAffectsBlur
         ? w->opacity() * data.opacity()
         : data.opacity();
 
     QList<QRectF> effectiveShape;
     effectiveShape.reserve(blurShape.rectCount());
-    if (region != Region::infinite()) {
-        for (const Rect &clipRect : region.rects()) {
-            const QRectF deviceClipRect = snapToPixelGridF(scaledRect(QRectF(QRect(clipRect)), viewport.scale()))
-                    .translated(-deviceBackgroundRect.topLeft());
-            for (const QRect &shapeRect : blurShape) {
-                const QRectF deviceShapeRect = snapToPixelGridF(scaledRect(shapeRect.translated(-backgroundRect.topLeft()), viewport.scale()));
-                if (const QRectF intersected = deviceClipRect.intersected(deviceShapeRect); !intersected.isEmpty()) {
-                    effectiveShape.append(intersected);
-                }
-            }
-        }
-    } else {
-        for (const QRect &rect : blurShape) {
-            effectiveShape.append(snapToPixelGridF(scaledRect(rect.translated(-backgroundRect.topLeft()), viewport.scale())));
-        }
+    for (const QRect &rect : blurShape) {
+        effectiveShape.append(QRectF(QRect(viewport.mapToDeviceCoordinatesAligned(Rect(rect)))).translated(-deviceBackgroundRect.topLeft()));
     }
     if (effectiveShape.isEmpty()) {
         return;
@@ -821,8 +867,8 @@ void BlurEffect::blur(BlurRenderData &renderInfo, const RenderTarget &renderTarg
     // Since the VBO is shared, the texture needs to be blurred before the geometry is uploaded, otherwise it will be
     // reset.
     GLTexture *staticBlurTexture = nullptr;
-    if (w && hasStaticBlur(w)) {
-        staticBlurTexture = ensureStaticBlurTexture(m_currentScreen, renderTarget);
+    if (w && hasStaticBlur(w) && !effects->waylandDisplay()) {
+        staticBlurTexture = ensureStaticBlurTexture(screen, renderTarget);
         if (staticBlurTexture) {
             renderInfo.textures.clear();
             renderInfo.framebuffers.clear();
@@ -873,9 +919,14 @@ void BlurEffect::blur(BlurRenderData &renderInfo, const RenderTarget &renderTarg
 
     // Fetch the pixels behind the shape that is going to be blurred.
     if (!staticBlurTexture) {
-        const Region dirtyRegion = region.intersected(backgroundRect);
+        // Convert device region to logical, then intersect with logical backgroundRect
+        Region dirtyRegion = viewport.mapFromDeviceCoordinatesAligned(region) & backgroundRect;
+        if (dirtyRegion.isEmpty() && !backgroundRect.isEmpty()) {
+            dirtyRegion = Region(Rect(backgroundRect));
+        }
         for (const Rect &dirtyRect : dirtyRegion.rects()) {
-            const auto destination = snapToPixelGrid(scaledRect(QRectF(QRect(dirtyRect)), viewport.scale())).translated(-deviceBackgroundRect.topLeft());
+            // source: logical rect (viewport maps to device), destination: device pixel offset in texture
+            const Rect destination = viewport.mapToDeviceCoordinatesAligned(dirtyRect).translated(-deviceBackgroundRect.topLeft());
             renderInfo.framebuffers[0]->blitFromRenderTarget(renderTarget, viewport, dirtyRect, destination);
         }
     }
@@ -989,17 +1040,18 @@ void BlurEffect::blur(BlurRenderData &renderInfo, const RenderTarget &renderTarg
 
         QMatrix4x4 projectionMatrix;
         projectionMatrix = viewport.projectionMatrix();
-        projectionMatrix.translate(deviceBackgroundRect.x(), deviceBackgroundRect.y());
+        projectionMatrix.translate(localBackgroundRect.x(), localBackgroundRect.y());
 
-        QRectF screenGeometry;
-        if (m_currentScreen) {
-            screenGeometry = scaledRect(m_currentScreen->geometryF(), viewport.scale());
+        QVector2D texStartPos(localBackgroundRect.x(), localBackgroundRect.y());
+        if (!effects->waylandDisplay() && screen) {
+            const QRectF screenGeometry = scaledRect(screen->geometryF(), viewport.scale());
+            texStartPos -= QVector2D(screenGeometry.x(), screenGeometry.y());
         }
 
         m_texture.shader->setUniform(m_texture.mvpMatrixLocation, projectionMatrix);
         m_texture.shader->setUniform(m_texture.textureSizeLocation, QVector2D(staticBlurTexture->size().width(), staticBlurTexture->size().height()));
-        m_texture.shader->setUniform(m_texture.texStartPosLocation, QVector2D(deviceBackgroundRect.x() - screenGeometry.x(), deviceBackgroundRect.y() - screenGeometry.y()));
-        m_texture.shader->setUniform(m_texture.blurSizeLocation, QVector2D(deviceBackgroundRect.width(), deviceBackgroundRect.height()));
+        m_texture.shader->setUniform(m_texture.texStartPosLocation, texStartPos);
+        m_texture.shader->setUniform(m_texture.blurSizeLocation, QVector2D(localBackgroundRect.width(), localBackgroundRect.height()));
         m_texture.shader->setUniform(m_texture.topCornerRadiusLocation, topCornerRadius);
         m_texture.shader->setUniform(m_texture.bottomCornerRadiusLocation, bottomCornerRadius);
         m_texture.shader->setUniform(m_texture.antialiasingLocation, m_settings.roundedCorners.antialiasing);
@@ -1102,7 +1154,7 @@ void BlurEffect::blur(BlurRenderData &renderInfo, const RenderTarget &renderTarg
         m_upsamplePass.shader->setUniform(m_upsamplePass.opacityLocation, static_cast<float>(opacity));
 
         projectionMatrix = viewport.projectionMatrix();
-        projectionMatrix.translate(deviceBackgroundRect.x(), deviceBackgroundRect.y());
+        projectionMatrix.translate(localBackgroundRect.x(), localBackgroundRect.y());
         m_upsamplePass.shader->setUniform(m_upsamplePass.mvpMatrixLocation, projectionMatrix);
 
         const QVector2D halfpixel(0.5 / read->colorAttachment()->width(),
@@ -1143,7 +1195,7 @@ void BlurEffect::blur(GLTexture *texture)
     WindowPaintData data;
 
     GLFramebuffer::pushFramebuffer(blurredFramebuffer.get());
-    blur(renderData, renderTarget, renderViewport, nullptr, 0, Region(Rect(textureRect)), data);
+    blur(renderData, renderTarget, renderViewport, nullptr, 0, Region(Rect(textureRect)), data, nullptr);
     GLFramebuffer::popFramebuffer();
 }
 

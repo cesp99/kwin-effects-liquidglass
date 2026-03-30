@@ -15,6 +15,7 @@
 #include "window.h"
 
 #include <QList>
+#include <QSet>
 
 #include <unordered_map>
 
@@ -40,7 +41,7 @@ struct BlurEffectData
     /// The region that should be blurred behind the frame
     std::optional<QRegion> frame;
 
-    /// The render data per screen. Screens can have different color spaces.
+    /// The render data per screen.
     std::unordered_map<LogicalOutput *, BlurRenderData> render;
 
     ItemEffect windowEffect;
@@ -62,6 +63,7 @@ public:
     void reconfigure(ReconfigureFlags flags) override;
     void prePaintScreen(ScreenPrePaintData &data, std::chrono::milliseconds presentTime) override;
     void prePaintWindow(RenderView *view, EffectWindow *w, WindowPrePaintData &data, std::chrono::milliseconds presentTime) override;
+    void paintWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &region, WindowPaintData &data) override;
     void drawWindow(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &region, WindowPaintData &data) override;
 
     bool provides(Feature feature) override;
@@ -98,7 +100,7 @@ private:
     /*
      * @param w The pointer to the window being blurred, nullptr if an image is being blurred.
      */
-    void blur(BlurRenderData &renderInfo, const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &region, WindowPaintData &data);
+    void blur(BlurRenderData &renderInfo, const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const Region &region, WindowPaintData &data, LogicalOutput *screen);
     void blur(GLTexture *texture);
 
     /**
@@ -183,9 +185,12 @@ private:
 
     bool m_valid = false;
     long net_wm_blur_region = 0;
-    QRegion m_paintedArea; // keeps track of all painted areas (from bottom to top)
-    QRegion m_currentBlur; // keeps track of the currently blured area of the windows(from bottom to top)
+    Region m_paintedDeviceArea; // keeps track of all painted areas in device coords (from bottom to top)
+    Region m_currentDeviceBlur; // keeps track of the currently blured area in device coords (from bottom to top)
+    RenderView *m_currentView = nullptr;
     LogicalOutput *m_currentScreen = nullptr;
+    std::unordered_set<const EffectWindow *> m_windowsBlurredThisFrame;
+    QSet<QString> m_loggedBlurOutputs;
 
     size_t m_iterationCount; // number of times the texture will be downsized to half size
     int m_offset;

@@ -25,6 +25,7 @@ kconfig_add_kcfg_files(forceblur_SOURCES
 
 if(BETTERBLUR_WAYLAND)
     add_library(forceblur MODULE ${forceblur_SOURCES})
+    set_target_properties(forceblur PROPERTIES OUTPUT_NAME kwin4_effect_forceblur)
     target_link_libraries(forceblur PRIVATE
         KDecoration3::KDecoration
         KF6::ConfigGui
@@ -34,6 +35,7 @@ if(BETTERBLUR_WAYLAND)
 endif()
 if(BETTERBLUR_X11)
     add_library(forceblur_x11 MODULE ${forceblur_SOURCES})
+    set_target_properties(forceblur_x11 PROPERTIES OUTPUT_NAME kwin4_effect_forceblur)
     target_link_libraries(forceblur_x11 PRIVATE
         KDecoration3::KDecoration
         KF6::ConfigGui
