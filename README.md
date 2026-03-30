@@ -9,7 +9,7 @@ Better Blur is a fork of the Plasma 6 blur effect with additional features and b
 - Rounded corners with anti-aliasing
 - Static blur for much lower GPU usage
 - Adjust blur brightness, contrast and saturation
-- Refraction (by [@DaddelZeit](https://github.com/DaddelZeit) and [@iGerman00](https://github.com/iGerman00))
+- Refraction (by [@cesp99](https://github.com/cesp99), [@DaddelZeit](https://github.com/DaddelZeit) and [@iGerman00](https://github.com/iGerman00))
 
 ### Bug fixes
 Fixes for blur-related Plasma bugs that haven't been patched yet.
@@ -198,6 +198,6 @@ This effect can be very resource-intensive if you have a lot of windows open. On
 Intel GPUs use software cursor by default due to [this bug](https://gitlab.freedesktop.org/drm/intel/-/issues/9571), however it doesn't seem to affect all GPUs.
 
 # Credits
-- [taj-ny/kwin-effects-forceblur](https://github.com/taj-ny/kwin-effects-forceblur) - original fork this is based on
 - [iGerman00/kwin-effects-forceblur](https://github.com/iGerman00/kwin-effects-forceblur) - upstream of this fork
+- [taj-ny/kwin-effects-forceblur](https://github.com/taj-ny/kwin-effects-forceblur) - original fork this is based on
 - [a-parhom/LightlyShaders](https://github.com/a-parhom/LightlyShaders) - CMakeLists.txt files
